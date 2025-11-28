@@ -1,38 +1,11 @@
-.SUFFIXES:
-
 override OUTPUT := nightjaros
 
-TOOLCHAIN :=
-TOOLCHAIN_PREFIX :=
-ifneq ($(TOOLCHAIN),)
-    ifeq ($(TOOLCHAIN_PREFIX),)
-        TOOLCHAIN_PREFIX := $(TOOLCHAIN)-
-    endif
-endif
+TOOLCHAIN := x86_64-elf-
 
-ifneq ($(TOOLCHAIN_PREFIX),)
-    CC := $(TOOLCHAIN_PREFIX)gcc
-else
-    CC := cc
-endif
-
+CC := $(TOOLCHAIN_PREFIX)gcc
 LD := $(TOOLCHAIN_PREFIX)ld
 
-CFLAGS := -g -O2 -pipe
-
-CPPFLAGS :=
-
-NASMFLAGS := -g
-
-LDFLAGS :=
-
-override CC_IS_CLANG := $(shell ! $(CC) --version 2>/dev/null | grep -q '^Target: '; echo $$?)
-
-ifeq ($(CC_IS_CLANG),1)
-    override CC += \
-        -target x86_64-unknown-none-elf
-endif
-
+# Internal C flags that should not be changed by the user.
 override CFLAGS += \
     -Wall \
     -Wextra \
@@ -54,12 +27,14 @@ override CFLAGS += \
     -mno-red-zone \
     -mcmodel=kernel
 
+# Internal C preprocessor flags that should not be changed by the user.
 override CPPFLAGS := \
-    -Isrc/ \
+    -I src \
     $(CPPFLAGS) \
     -MMD \
     -MP
 
+# Internal nasm flags that should not be changed by the user.
 override NASMFLAGS := \
     -f elf64 \
     $(patsubst -g,-g -F dwarf,$(NASMFLAGS)) \
@@ -70,20 +45,39 @@ override LDFLAGS += \
     -nostdlib \
     -static \
     -z max-page-size=0x1000 \
-    --gc-sections \
     -T linker.ld
 
 override SRCFILES := $(shell find -L src -type f 2>/dev/null | LC_ALL=C sort)
 override CFILES := $(filter %.c,$(SRCFILES))
 override ASFILES := $(filter %.S,$(SRCFILES))
-override NASMFILES := $(filter %.asm,$(SRCFILES))
 override OBJ := $(addprefix obj/,$(CFILES:.c=.c.o) $(ASFILES:.S=.S.o) $(NASMFILES:.asm=.asm.o))
 override HEADER_DEPS := $(addprefix obj/,$(CFILES:.c=.c.d) $(ASFILES:.S=.S.d))
 
-.PHONY: all
-all: bin/$(OUTPUT)
+.PHONY: all build_iso run clean
+.SUFFIXES: .o .c .S
+
+all : build_iso
 
 -include $(HEADER_DEPS)
+
+build_iso : bin/$(OUTPUT)
+	mkdir -p isodir/
+	mkdir -p isodir/boot/
+	mkdir -p isodir/boot/grub/
+	cp bin/$(OUTPUT) isodir/boot/$(OUTPUT)
+	cp ramdisk.img isodir/boot/ramdisk.img
+	cp grub.cfg isodir/boot/grub/grub.cfg
+	grub2-mkrescue -o $(OUTPUT).iso isodir
+
+run : build_iso
+	qemu-system-x86_64 \
+	-machine q35 \
+	-m 512M \
+	-drive if=pflash,format=raw,readonly=on,file=./ovmf/OVMF_CODE.fd \
+	-drive if=pflash,format=raw,file=./ovmf/OVMF_VARS.fd \
+	-cdrom $(OUTPUT).iso \
+	-drive file=ramdisk.img,format=raw \
+	-serial stdio
 
 bin/$(OUTPUT): linker.ld $(OBJ)
 	mkdir -p "$(dir $@)"
@@ -95,12 +89,7 @@ obj/%.c.o: %.c
 
 obj/%.S.o: %.S
 	mkdir -p "$(dir $@)"
-	$(CC) $(CFLAGS) $(CPPFLAGS) -c $< -o $@
-
-obj/%.asm.o: %.asm
-	mkdir -p "$(dir $@)"
 	nasm $(NASMFLAGS) $< -o $@
 
-.PHONY: clean
 clean:
-	rm -rf bin obj
+	rm -rf bin obj isodir $(OUTPUT).iso

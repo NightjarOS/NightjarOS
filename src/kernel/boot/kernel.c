@@ -4,44 +4,74 @@
 
 #include <types.h>
 
-#include <limine/limine.h>
 
-__attribute__((used, section(".limine_requests")))
-static volatile uint64_t limine_base_revision[] = LIMINE_BASE_REVISION(4);
+uint8_t inb(const uint16_t port) {
+    unsigned char v;
 
-__attribute__((used, section(".limine_requests")))
-static volatile struct limine_framebuffer_request framebuffer_request = {
-    .id = LIMINE_FRAMEBUFFER_REQUEST_ID,
-    .revision = 0
-};
+    asm volatile ("inb %w1,%0":"=a" (v):"Nd" (port));
+    return v;
+}
 
-__attribute__((used, section(".limine_requests_start")))
-static volatile uint64_t limine_requests_start_marker[] = LIMINE_REQUESTS_START_MARKER;
+void outb(const uint16_t port, const uint8_t value) {
+    asm volatile ("outb %b0,%w1": :"a" (value), "Nd" (port));
+}
 
-__attribute__((used, section(".limine_requests_end")))
-static volatile uint64_t limine_requests_end_marker[] = LIMINE_REQUESTS_END_MARKER;
+
+#define COM1 0x3F8
+#define COM2 0x2F8
+#define COM3 0x3E8
+#define COM4 0x2E8
+
+bool serial_init(void) {
+   outb(COM1 + 1, 0x00);    // Disable all interrupts
+   outb(COM1 + 3, 0x80);    // Enable DLAB (set baud rate divisor)
+   outb(COM1 + 0, 0x03);    // Set divisor to 3 (lo byte) 38400 baud
+   outb(COM1 + 1, 0x00);    //                  (hi byte)
+   outb(COM1 + 3, 0x03);    // 8 bits, no parity, one stop bit
+   outb(COM1 + 2, 0xC7);    // Enable FIFO, clear them, with 14-byte threshold
+   outb(COM1 + 4, 0x0B);    // IRQs enabled, RTS/DSR set
+   outb(COM1 + 4, 0x1E);    // Set in loopback mode, test the serial chip
+   outb(COM1 + 0, 0xAE);    // Test serial chip (send byte 0xAE and check if serial returns same byte)
+
+    if(inb(COM1 + 0) != 0xAE) return false;
+
+    outb(COM1 + 4, 0x0F);
+    return true;
+}
+
+uint8_t serial_received(void) {
+    return inb(COM1 + 5) & 1u;
+}
+
+uint8_t serial_read(void) {
+    while (serial_received() == 0);
+
+    return inb(COM1);
+}
+
+uint8_t is_transmit_empty(void) {
+    return inb(COM1 + 5) & 0x20u;
+}
+
+void serial_putchar(const char c) {
+    while (is_transmit_empty() == 0);
+
+    outb(COM1, (uint8_t)c);
+}
+
+void serial_write(const char *const text, const size_t size) {
+    for(size_t i = 0u; i < size; ++i) {
+        serial_putchar(text[i]);
+    }
+}
 
 static void halt(void) {
     for(;;) {
+        serial_write("hello, world", 12);
         asm("hlt");
     }
 }
 
 void kernel_main(void) {
-    if (LIMINE_BASE_REVISION_SUPPORTED(limine_base_revision) == false) {
-        halt();
-    }
-
-    if (framebuffer_request.response == NULL || framebuffer_request.response->framebuffer_count < 1) {
-        halt();
-    }
-
-    struct limine_framebuffer *const framebuffer = framebuffer_request.response->framebuffers[0];
-
-    for (size_t i = 0; i < 100; i++) {
-        volatile uint32_t *const fb_ptr = framebuffer->address;
-        fb_ptr[i * (framebuffer->pitch / 4) + i] = 0xffffff;
-    }
-
     halt();
 }

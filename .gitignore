@@ -1,5 +1,5 @@
-image.iso
-iso_root/
+nightjaros.iso
+isodir/
 bin/
 obj/
-limine/
+ovmf/
