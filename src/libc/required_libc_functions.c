@@ -51,3 +51,10 @@ int memcmp(const void *const lhs, const void *const rhs, const size_t count) {
 
     return 0;
 }
+
+
+size_t strlen(const char *const str) {
+    size_t len = 0u;
+    for(; str[len] != '\0'; ++len);
+    return len;
+}

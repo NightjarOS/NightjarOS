@@ -27,7 +27,7 @@ PT_PRESENT equ 1
 PT_WRITEABLE equ 2
 
 ENTRIES_PER_PT equ 512
-SIZEOFOF_PT_ENTRY equ 8
+SIZEOF_PT_ENTRY equ 8
 PAGE_SIZE equ 0x1000
 
 ; bit layout for cr4:
@@ -135,6 +135,11 @@ IA32_EFER_LME_BIT equ 1 << 8
 
 PAGING_ENABLE_BIT equ 1 << 31
 
+KERNEL_OFFSET equ 0XFFFFFFFF80000000
+
+%define V2P(a) ((a) - KERNEL_OFFSET)
+%define P2V(a) ((a) + KERNEL_OFFSET)
+
 
 MULTIBOOT2_HEADER_MAGIC equ 0xe85250d6
 GRUB_MULTIBOOT_ARCHITECTURE_I386 equ 0
@@ -176,18 +181,18 @@ resb PAGE_SIZE
 boot_stack:
 
 
-section .text
+section .boot_trampoline
 
 BITS 32
 boot_die:
-    ; TODO: In the future dump a specific error message over serial console
+    ; TODO: In the future, we should print an error message instead of just silently `hlt`ing.
     hlt
 
 BITS 32
 disable_paging_32_bit:
-    mov eax, cr0
-    and eax, ~CR0_PAGING
-    mov cr0, eax
+    mov ecx, cr0 ; we use `ecx` since we call this before we set up a stack and the multiboot magic is passed to us in `eax`
+    and ecx, ~CR0_PAGING
+    mov cr0, ecx
     ret
 
 BITS 32
@@ -239,12 +244,12 @@ _start:
 
     call disable_paging_32_bit
 
-    mov esp, boot_stack
+    mov esp, V2P(boot_stack)
 
     push ebx ; mboot header
     push eax ; mboot magic
 
-    lgdt [gdt_ptr]
+    lgdt [V2P(gdt_ptr)]
 
     jmp 0x08:.load_segments
 .load_segments:
@@ -296,16 +301,25 @@ _start:
     ; }
     ; We repeat this `SIZEOF_PAGE_TABLE` number of times since we are overwriting 4 pages worth of data (for each hierarchy of the 4-level page table)
 
-    mov edi, PML4T_ADDR
+    ; TODO: Currently we hardcode in/assume that the kernel image size is <= 2MiB - 1MiB = 1MiB (we map 2MiB, but we minus the 1MiB because we skip it with our `KERNEL_PHYS_START` in the linker script).
+    ;   In the future, we should instead have linker symbols that let us know the size of the kernel and then use that info to always map the necessary number of pages.
+    ;   But because there is no harm in mapping a bit more low RAM than the kernel needs and because for the near future our kernel size will be <= 1MiB, this is fine as-is.
+    ;   We will also have to change this if we ever do KASLR.
 
     ; set up page directory structure:
-    mov DWORD [edi], PDPT_ADDR & PT_ADDR_MASK | PT_PRESENT | PT_WRITEABLE
-    
+    mov edi, PML4T_ADDR
+    mov DWORD [edi], PDPT_ADDR & PT_ADDR_MASK | PT_PRESENT | PT_WRITEABLE ; identity map
+    add edi, 511 * SIZEOF_PT_ENTRY
+    mov DWORD [edi], PDPT_ADDR & PT_ADDR_MASK | PT_PRESENT | PT_WRITEABLE ; higher half map
+
     mov edi, PDPT_ADDR
-    mov DWORD [edi], PDT_ADDR & PT_ADDR_MASK | PT_PRESENT | PT_WRITEABLE
+    mov DWORD [edi], PDT_ADDR & PT_ADDR_MASK | PT_PRESENT | PT_WRITEABLE ; identity map
+    add edi, 510 * SIZEOF_PT_ENTRY
+    mov DWORD [edi], PDT_ADDR & PT_ADDR_MASK | PT_PRESENT | PT_WRITEABLE ; higher half map
 
     mov edi, PDT_ADDR
     mov DWORD [edi], PT_ADDR & PT_ADDR_MASK | PT_PRESENT | PT_WRITEABLE
+    ; since the higher half map offset is 2MiB aligned, the PDT entry is the same for both the identity map and higher half
 
     ; fill up the page table:
     mov edi, PT_ADDR
@@ -315,7 +329,7 @@ _start:
 .set_entry:
     mov DWORD [edi], ebx
     add ebx, PAGE_SIZE
-    add edi, SIZEOFOF_PT_ENTRY
+    add edi, SIZEOF_PT_ENTRY
     loop .set_entry
     ; Equivalent C code:
     ; uint32_t* edi = PT_ADDR;
@@ -323,7 +337,7 @@ _start:
     ; for(uint32_t ecx = ENTRIES_PER_PT; ecx != 0; --ecx) {
     ;     *edi = ebx;
     ;     ebx += PAGE_SIZE;
-    ;     edi += SIZEOFOF_PT_ENTRY/4; // divided by 4 since `edi` is a pointer to a 4-byte value (so `+= 1` increments the address by 4)
+    ;     edi += SIZEOF_PT_ENTRY/4; // divided by 4 since `edi` is a pointer to a 4-byte value (so `+= 1` increments the address by 4)
     ; }
 
     mov edi, PML4T_ADDR
@@ -333,10 +347,12 @@ _start:
     or eax, PAGING_ENABLE_BIT
     mov cr0, eax
 
-    pop eax
-    pop ebx
+    pop ecx ; mboot magic
+    pop ebx ; mboot header
 
-    jmp 0x18:long_mode_entry
+    jmp 0x18:V2P(long_mode_entry)
+
+section .text
 
 BITS 64
 long_mode_entry:
@@ -348,8 +364,26 @@ long_mode_entry:
     mov ss, ax
 
     mov rsp, boot_stack
-    mov edi, eax    ; first arg = mboot magic
-    mov esi, ebx    ; second arg = mboot header
+    
+    ; We have to indirect jump here so that it will actually load the higher half absolute address.
+    ;  If we direct jump, because both `long_mode_entry` and `higher_half_long_mode` are in the `.text` section,
+    ;   it'll just do a relative jump and not actually load us into the higher half address space.
+    mov rax, higher_half_long_mode
+    jmp rax
+
+BITS 64
+higher_half_long_mode:
+    mov rdi, P2V(PML4T_ADDR)
+    mov QWORD [rdi], 0 ; remove identity mapping
+
+    mov rdi, P2V(PDPT_ADDR) ; use the higher half virtual address since we just removed the identity map entry
+    mov QWORD [rdi], 0 ; remove identity mapping
+
+    mov rdi, PML4T_ADDR
+    mov cr3, rdi
+
+    mov rdi, rcx    ; first arg = mboot magic
+    mov rsi, rbx    ; second arg = mboot header
     extern kernel_main
     call kernel_main
 
@@ -375,4 +409,4 @@ gdt_end:
 align 4
 gdt_ptr:
     dw gdt_end - gdt_start - 1 ; sizeof(gdt) - 1
-    dd gdt_start
+    dd V2P(gdt_start)

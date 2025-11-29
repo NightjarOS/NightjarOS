@@ -3,6 +3,9 @@
 #include <stdbool.h>
 
 #include <types.h>
+#include <libc/required_libc_functions.h>
+
+#include "multiboot.h"
 
 
 uint8_t inb(const uint16_t port) {
@@ -65,13 +68,58 @@ void serial_write(const char *const text, const size_t size) {
     }
 }
 
+void serial_writestring(const char *const text) {
+    serial_write(text, strlen(text));
+}
+
 static void halt(void) {
     for(;;) {
-        serial_write("hello, world", 12);
         asm("hlt");
     }
 }
 
-void kernel_main(void) {
+char* kint_to_str(uint64_t input, char *const string_ret) {
+    uint32_t index = 0u;
+
+    do {
+        const uint64_t current_input = input % 10u;
+        input /= 10u;
+
+        const char current_char = (char) (current_input + 48u);
+
+        string_ret[index++] = current_char;
+    } while(input);
+
+    string_ret[index] = '\0';
+
+    for(size_t i = 0u; i < index/2u; ++i) {
+        const char temp = string_ret[i];
+        string_ret[i] = string_ret[index-i-1u];
+        string_ret[index-i-1u] = temp;
+    }
+
+    return string_ret;
+}
+
+void kernel_main(const uint64_t mboot_magic, const uint64_t mboot_header) {
+    if(serial_init()) {
+        serial_writestring("Serial driver works.\n");
+    } else {
+        halt();
+    }
+
+    if (mboot_magic != MULTIBOOT2_BOOTLOADER_MAGIC) {
+        char expected_str[256];
+        char actual_str[256];
+        serial_writestring("Invalid Multiboot Magic!\n");
+        serial_writestring("Expected: ");
+        serial_writestring(kint_to_str(MULTIBOOT2_BOOTLOADER_MAGIC, expected_str));
+        serial_writestring(", Actual: ");
+        serial_writestring(kint_to_str(mboot_magic, actual_str));
+        serial_writestring(".\n");
+    } else {
+        serial_writestring("The multiboot structure was loaded properly.\n");
+    }
+
     halt();
 }
