@@ -1,12 +1,3 @@
-CR0_PAGING equ 1 << 31
-
-SIZEOF_PAGE_TABLE equ 4096
-
-PML4T_ADDR equ 0x1000
-PDPT_ADDR equ 0x2000
-PDT_ADDR equ 0x3000
-PT_ADDR equ 0x4000
-
 ; bit layout for 4-level/5-level paging entries:
 ; bit 0 = present bit
 ; bit 1 = r/w bit
@@ -20,15 +11,17 @@ PT_ADDR equ 0x4000
 ; bit 11 = ignored for normal paging, only used for HLAT paging (which we don't use)
 ; bits [12, 51] = physical address of 4KiB aligned page directory pointer
 ; bits [52, 62] = ignored
-; bit 63 = execute bit
-PT_ADDR_MASK equ 0xFFFFFFFFFF000
+; bit 63 = execute-disable bit
+
+SIZEOF_PAGE_TABLE equ 4096
 
 PT_PRESENT equ 1
 PT_WRITEABLE equ 2
 
 ENTRIES_PER_PT equ 512
 SIZEOF_PT_ENTRY equ 8
-PAGE_SIZE equ 0x1000
+PAGE_SIZE equ 4096
+STACK_SIZE equ 32 * PAGE_SIZE
 
 ; bit layout for cr4:
 ; bit 0 = virtual-8086 mode extensions. Enables interrupt-handling and exception-handling extensions in virtual-8086 mode when set; disables the extensions when clear. See the Intel manual for more information.
@@ -121,6 +114,7 @@ PAGE_SIZE equ 0x1000
 ; bit 21 = identification. The ability of a program to set or clear this flag indicates support for the CPUID instruction.
 ; bit [22, 31] = reserved (must be 0)
 
+CR0_PAGING equ 1 << 31
 
 EFLAGS_ID_BIT equ 1 << 21
 
@@ -129,17 +123,16 @@ CPUID_EXTENSIONS_FEATURES equ 0x80000001
 CPUID_EDX_EXTENSION_FEATURE_LONG_MODE equ 1 << 29
 
 PAE_ENABLE_BIT equ 1 << 5
+GLOBAL_PAGE_ENABLE_BIT equ 1 << 7
 
 IA32_EFER equ 0xC0000080
 IA32_EFER_LME_BIT equ 1 << 8
 
 PAGING_ENABLE_BIT equ 1 << 31
 
-KERNEL_OFFSET equ 0XFFFFFFFF80000000
+KERNEL_OFFSET equ 0xFFFFFFFF80000000
 
 %define V2P(a) ((a) - KERNEL_OFFSET)
-%define P2V(a) ((a) + KERNEL_OFFSET)
-
 
 MULTIBOOT2_HEADER_MAGIC equ 0xe85250d6
 GRUB_MULTIBOOT_ARCHITECTURE_I386 equ 0
@@ -176,9 +169,22 @@ multiboot_header_end:
 section .bss
 
 global boot_stack
+BITS 64
 align PAGE_SIZE
-resb PAGE_SIZE
+resb STACK_SIZE ; 32KiB kernel stack size
 boot_stack:
+
+global pml4t
+BITS 64
+align PAGE_SIZE
+pml4t:
+resb PAGE_SIZE
+pdpt:
+resb PAGE_SIZE
+pdt:
+resb PAGE_SIZE
+pt:
+resb PAGE_SIZE
 
 
 section .boot_trampoline
@@ -199,7 +205,7 @@ BITS 32
 check_cpuid:
     pushfd
     pop eax
-    
+
     mov ecx, eax ; store the original EFLAGS content so it can be compared
     xor eax, EFLAGS_ID_BIT ; toggles bit 21 of cpuid
 
@@ -249,6 +255,10 @@ _start:
     push ebx ; mboot header
     push eax ; mboot magic
 
+    extern multiboot_total_size
+    mov ecx, [ebx] ; We read this here since paging is disabled. This is more elegant than mapping a page just to read the multiboot size (and then mapping the rest afterwards).
+    mov [V2P(multiboot_total_size)], ecx
+
     lgdt [V2P(gdt_ptr)]
 
     jmp 0x08:.load_segments
@@ -279,6 +289,7 @@ _start:
 
     mov eax, cr4
     or eax, PAE_ENABLE_BIT
+    or eax, GLOBAL_PAGE_ENABLE_BIT
     mov cr4, eax
 
     mov ecx, IA32_EFER
@@ -287,12 +298,12 @@ _start:
     wrmsr
 
     ; zero out the page tables:
-    mov edi, PML4T_ADDR
+    mov edi, V2P(pml4t)
     xor eax, eax
-    mov ecx, SIZEOF_PAGE_TABLE
+    mov ecx, SIZEOF_PAGE_TABLE/4
     rep stosd
     ; Equivalent C code:
-    ; uint32_t* edi = PML4T_ADDR;
+    ; uint32_t* edi = V2P(pml4t);
     ; uint32_t eax = 0u;
     ; uint32_t ecx = SIZEOF_PAGE_TABLE;
     ; for(int i = 0; i < ecx; ++i) {
@@ -307,22 +318,28 @@ _start:
     ;   We will also have to change this if we ever do KASLR.
 
     ; set up page directory structure:
-    mov edi, PML4T_ADDR
-    mov DWORD [edi], PDPT_ADDR & PT_ADDR_MASK | PT_PRESENT | PT_WRITEABLE ; identity map
+    mov edi, V2P(pml4t)
+    mov eax, V2P(pdpt)
+    or eax, PT_PRESENT | PT_WRITEABLE
+    mov DWORD [edi], eax ; identity map
     add edi, 511 * SIZEOF_PT_ENTRY
-    mov DWORD [edi], PDPT_ADDR & PT_ADDR_MASK | PT_PRESENT | PT_WRITEABLE ; higher half map
+    mov DWORD [edi], eax ; higher half map
 
-    mov edi, PDPT_ADDR
-    mov DWORD [edi], PDT_ADDR & PT_ADDR_MASK | PT_PRESENT | PT_WRITEABLE ; identity map
+    mov edi, V2P(pdpt)
+    mov eax, V2P(pdt)
+    or eax, PT_PRESENT | PT_WRITEABLE
+    mov DWORD [edi], eax ; identity map
     add edi, 510 * SIZEOF_PT_ENTRY
-    mov DWORD [edi], PDT_ADDR & PT_ADDR_MASK | PT_PRESENT | PT_WRITEABLE ; higher half map
+    mov DWORD [edi], eax ; higher half map
 
-    mov edi, PDT_ADDR
-    mov DWORD [edi], PT_ADDR & PT_ADDR_MASK | PT_PRESENT | PT_WRITEABLE
+    mov edi, V2P(pdt)
+    mov eax, V2P(pt)
+    or eax, PT_PRESENT | PT_WRITEABLE
+    mov DWORD [edi], eax
     ; since the higher half map offset is 2MiB aligned, the PDT entry is the same for both the identity map and higher half
 
     ; fill up the page table:
-    mov edi, PT_ADDR
+    mov edi, V2P(pt)
     mov ebx, PT_PRESENT | PT_WRITEABLE
     mov ecx, ENTRIES_PER_PT
 
@@ -340,7 +357,7 @@ _start:
     ;     edi += SIZEOF_PT_ENTRY/4; // divided by 4 since `edi` is a pointer to a 4-byte value (so `+= 1` increments the address by 4)
     ; }
 
-    mov edi, PML4T_ADDR
+    mov edi, V2P(pml4t)
     mov cr3, edi
 
     mov eax, cr0
@@ -373,13 +390,13 @@ long_mode_entry:
 
 BITS 64
 higher_half_long_mode:
-    mov rdi, P2V(PML4T_ADDR)
+    mov rdi, pml4t
     mov QWORD [rdi], 0 ; remove identity mapping
 
-    mov rdi, P2V(PDPT_ADDR) ; use the higher half virtual address since we just removed the identity map entry
+    mov rdi, pdpt ; use the higher half virtual address since we just removed the identity map entry
     mov QWORD [rdi], 0 ; remove identity mapping
 
-    mov rdi, PML4T_ADDR
+    mov rdi, V2P(pml4t)
     mov cr3, rdi
 
     mov rdi, rcx    ; first arg = mboot magic

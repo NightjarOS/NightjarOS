@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stddef.h>
+#include <stdint.h>
 
 #include <types.h>
 
@@ -10,3 +11,7 @@ void* memmove(void* dest, const void* src, size_t count);
 int memcmp(const void* lhs, const void* rhs, size_t count);
 
 size_t strlen(const char* str);
+
+static inline uint64_t max(const uint64_t lhs, const uint64_t rhs) {
+    return (lhs > rhs) ? lhs : rhs;
+}

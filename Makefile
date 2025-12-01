@@ -49,12 +49,12 @@ override LDFLAGS += \
 
 override SRCFILES := $(shell find -L src -type f 2>/dev/null | LC_ALL=C sort)
 override CFILES := $(filter %.c,$(SRCFILES))
-override ASFILES := $(filter %.S,$(SRCFILES))
-override OBJ := $(addprefix obj/,$(CFILES:.c=.c.o) $(ASFILES:.S=.S.o) $(NASMFILES:.asm=.asm.o))
-override HEADER_DEPS := $(addprefix obj/,$(CFILES:.c=.c.d) $(ASFILES:.S=.S.d))
+override ASFILES := $(filter %.asm,$(SRCFILES))
+override OBJ := $(addprefix obj/,$(CFILES:.c=.c.o) $(ASFILES:.asm=.asm.o))
+override HEADER_DEPS := $(addprefix obj/,$(CFILES:.c=.c.d) $(ASFILES:.asm=.asm.d))
 
 .PHONY: all build_iso run clean
-.SUFFIXES: .o .c .S
+.SUFFIXES: .o .c .asm
 
 all : build_iso
 
@@ -72,7 +72,7 @@ build_iso : bin/$(OUTPUT)
 run : build_iso
 	qemu-system-x86_64 \
 	-machine q35 \
-	-m 512M \
+	-m 16G \
 	-drive if=pflash,format=raw,readonly=on,file=./ovmf/OVMF_CODE.fd \
 	-drive if=pflash,format=raw,file=./ovmf/OVMF_VARS.fd \
 	-cdrom $(OUTPUT).iso \
@@ -87,7 +87,7 @@ obj/%.c.o: %.c
 	mkdir -p "$(dir $@)"
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c $< -o $@
 
-obj/%.S.o: %.S
+obj/%.asm.o: %.asm
 	mkdir -p "$(dir $@)"
 	nasm $(NASMFLAGS) $< -o $@
 

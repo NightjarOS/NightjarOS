@@ -1,124 +1,154 @@
 #include <stdint.h>
 #include <stddef.h>
-#include <stdbool.h>
 
 #include <types.h>
-#include <libc/required_libc_functions.h>
+#include <kernel/drivers/serial/serial.h>
+#include <kernel/error/error.h>
+
+#include <kernel/mem/mem_constants.h>
+#include <kernel/mem/map_mem.h>
+#include <kernel/mem/early_boot/early_boot_allocator.h>
 
 #include "multiboot.h"
 
-
-uint8_t inb(const uint16_t port) {
-    unsigned char v;
-
-    asm volatile ("inb %w1,%0":"=a" (v):"Nd" (port));
-    return v;
-}
-
-void outb(const uint16_t port, const uint8_t value) {
-    asm volatile ("outb %b0,%w1": :"a" (value), "Nd" (port));
-}
-
-
-#define COM1 0x3F8
-#define COM2 0x2F8
-#define COM3 0x3E8
-#define COM4 0x2E8
-
-bool serial_init(void) {
-   outb(COM1 + 1, 0x00);    // Disable all interrupts
-   outb(COM1 + 3, 0x80);    // Enable DLAB (set baud rate divisor)
-   outb(COM1 + 0, 0x03);    // Set divisor to 3 (lo byte) 38400 baud
-   outb(COM1 + 1, 0x00);    //                  (hi byte)
-   outb(COM1 + 3, 0x03);    // 8 bits, no parity, one stop bit
-   outb(COM1 + 2, 0xC7);    // Enable FIFO, clear them, with 14-byte threshold
-   outb(COM1 + 4, 0x0B);    // IRQs enabled, RTS/DSR set
-   outb(COM1 + 4, 0x1E);    // Set in loopback mode, test the serial chip
-   outb(COM1 + 0, 0xAE);    // Test serial chip (send byte 0xAE and check if serial returns same byte)
-
-    if(inb(COM1 + 0) != 0xAE) return false;
-
-    outb(COM1 + 4, 0x0F);
-    return true;
-}
-
-uint8_t serial_received(void) {
-    return inb(COM1 + 5) & 1u;
-}
-
-uint8_t serial_read(void) {
-    while (serial_received() == 0);
-
-    return inb(COM1);
-}
-
-uint8_t is_transmit_empty(void) {
-    return inb(COM1 + 5) & 0x20u;
-}
-
-void serial_putchar(const char c) {
-    while (is_transmit_empty() == 0);
-
-    outb(COM1, (uint8_t)c);
-}
-
-void serial_write(const char *const text, const size_t size) {
-    for(size_t i = 0u; i < size; ++i) {
-        serial_putchar(text[i]);
-    }
-}
-
-void serial_writestring(const char *const text) {
-    serial_write(text, strlen(text));
-}
-
-static void halt(void) {
-    for(;;) {
-        asm("hlt");
-    }
-}
-
-char* kint_to_str(uint64_t input, char *const string_ret) {
-    uint32_t index = 0u;
-
-    do {
-        const uint64_t current_input = input % 10u;
-        input /= 10u;
-
-        const char current_char = (char) (current_input + 48u);
-
-        string_ret[index++] = current_char;
-    } while(input);
-
-    string_ret[index] = '\0';
-
-    for(size_t i = 0u; i < index/2u; ++i) {
-        const char temp = string_ret[i];
-        string_ret[i] = string_ret[index-i-1u];
-        string_ret[index-i-1u] = temp;
-    }
-
-    return string_ret;
-}
-
-void kernel_main(const uint64_t mboot_magic, const uint64_t mboot_header) {
+void kernel_main(const uint64_t mboot_magic, const uint64_t mboot_header_phys_addr) {
     if(serial_init()) {
         serial_writestring("Serial driver works.\n");
     } else {
         halt();
     }
 
+    char str_buf[128];
     if (mboot_magic != MULTIBOOT2_BOOTLOADER_MAGIC) {
-        char expected_str[256];
-        char actual_str[256];
         serial_writestring("Invalid Multiboot Magic!\n");
         serial_writestring("Expected: ");
-        serial_writestring(kint_to_str(MULTIBOOT2_BOOTLOADER_MAGIC, expected_str));
+        serial_writestring(print_digits(MULTIBOOT2_BOOTLOADER_MAGIC, str_buf));
         serial_writestring(", Actual: ");
-        serial_writestring(kint_to_str(mboot_magic, actual_str));
+        serial_writestring(print_digits(mboot_magic, str_buf));
         serial_writestring(".\n");
     } else {
         serial_writestring("The multiboot structure was loaded properly.\n");
+    }
+
+    early_single_page_virt_page_init();
+
+    // TODO: This works, but is atrocious to read/look at. We should refactor it immensely.
+    const struct multiboot_tag_mmap* mmap = NULL;
+    uint64_t mmap_phys_addr = 0u;
+    uint64_t current_phys_ptr = mboot_header_phys_addr+8;
+    const struct multiboot_tag* current_virt_ptr = (struct multiboot_tag*)(early_single_page_virt_page_addr + offset_in_page(current_phys_ptr));
+    unconditional_map_page_in_first_2mib(current_phys_ptr, (uint64_t)current_virt_ptr);
+    for(; current_virt_ptr->type != MULTIBOOT_TAG_TYPE_END; current_phys_ptr = (uint64_t)(current_phys_ptr  + ((current_virt_ptr->size+7) & ~7))) {
+        current_virt_ptr = (struct multiboot_tag*)(early_single_page_virt_page_addr + offset_in_page(current_phys_ptr));
+        unconditional_map_page_in_first_2mib(current_phys_ptr, (uint64_t)current_virt_ptr);
+        if(current_virt_ptr->type == MULTIBOOT_TAG_TYPE_MMAP) {
+            mmap_phys_addr = current_phys_ptr;
+            mmap = (struct multiboot_tag_mmap*)current_virt_ptr;
+            // NOTE: The memory map is not guaranteed to be a single page, so we should replace the below check with the same traversal logic we used above when reading it later
+            const uint64_t mmap_base = (uint64_t)mmap;
+            const uint64_t mmap_end = mmap_base + mmap->size - 1;
+            if(round_down_to_page(mmap_base) != round_down_to_page(mmap_end)) {
+                halt_and_die("mmap crosses multiple pages.");
+            }
+            break;
+        }
+    }
+    uint64_t total_available_memory = 0u;
+    uint64_t amount_to_map = 0u;
+    if(mmap == NULL) {
+        serial_writestring("mmap could not be found.\n");
+    } else {
+        serial_writestring("mmap detected.\n");
+        for(uint32_t i = 0; i < (mmap->size - sizeof(struct multiboot_tag_mmap))/mmap->entry_size; ++i) {
+            const struct multiboot_mmap_entry current_entry = mmap->entries[i];
+            serial_writestring("mmap_entry : { [");
+            serial_writestring(print_hex(current_entry.addr, str_buf)); // TODO: Print hex
+            serial_writestring("--");
+            serial_writestring(print_hex(current_entry.addr+current_entry.len-1u, str_buf));
+            serial_writestring("], type: ");
+            if(current_entry.type == MULTIBOOT_MEMORY_AVAILABLE) {
+                serial_writestring("AVAILABLE.");
+                total_available_memory += current_entry.len;
+            }
+            else if(current_entry.type == MULTIBOOT_MEMORY_RESERVED) {
+                serial_writestring("RESERVED.");
+            }
+            else if(current_entry.type == MULTIBOOT_MEMORY_ACPI_RECLAIMABLE) {
+                serial_writestring("ACPI_RECLAIMABLE.");
+            }
+            else if(current_entry.type == MULTIBOOT_MEMORY_NVS) {
+                serial_writestring("NVS.");
+            }
+            else if(current_entry.type == MULTIBOOT_MEMORY_BADRAM) {
+                serial_writestring("BADRAM.");
+            }
+            else {
+                serial_writestring("UNKNOWN RESERVED: ");
+                serial_writestring(print_digits(current_entry.type, str_buf));
+                serial_writestring(".");
+            }
+            if(current_entry.type != MULTIBOOT_MEMORY_RESERVED) {
+                // NOTE: GRUB includes a dummy RESERVED entry at the end of the memory map that contains all the non-existent physical memory addresses (i.e. the other TiB's of RAM that don't exist if on a 16GiB machine).
+                //  To avoid allocating a ton of extra memory for page tables to memory that does not even exist, we just skip the RESERVED entries to calculate the effective "max physical memory address" for the linear map.
+                amount_to_map = max(amount_to_map, current_entry.addr + current_entry.len);
+            }
+            serial_writestring("}\n");
+        }
+        serial_writestring("Total available RAM in bytes (in hex): ");
+        serial_writestring(print_hex(total_available_memory, str_buf));
+        serial_writestring(".\n");
+    }
+
+    early_boot_alloc_init(max(KERNEL_V2P((uint64_t)&kernel_end), mboot_header_phys_addr+multiboot_total_size));
+
+    const uint64_t number_of_huge_pages = round_up(amount_to_map, HUGE_PAGE_1GIB)/HUGE_PAGE_1GIB;
+    const uint64_t number_of_pdpte_pages = round_up(number_of_huge_pages, 512)/512ULL;
+    if(number_of_pdpte_pages != 1) {
+        halt_and_die("More than 512GiB of memory detected.");
+    }
+
+    const uint64_t pdpte_phys_page_addr = early_boot_alloc(mmap, number_of_pdpte_pages*NORMAL_PAGE_SIZE);
+    uint64_t *const pdpte_virtual_page_ptr = (uint64_t*)early_single_page_virt_page_addr;
+    unconditional_map_page_in_first_2mib(pdpte_phys_page_addr, early_single_page_virt_page_addr);
+    memset((void*)early_single_page_virt_page_addr, 0, NORMAL_PAGE_SIZE);
+    for(uint64_t i = 0; i < number_of_huge_pages; ++i) {
+        pdpte_virtual_page_ptr[i] = (HUGE_PAGE_1GIB * i) | PDPTE_PRESENT | PDPTE_WRITEABLE | PDPTE_HUGE_PAGE | PDPTE_GLOBAL_PAGE | PDPTE_DISABLE_EXECUTE;
+    }
+    uint64_t *const pml4_virt_addr = (uint64_t*)(KERNEL_VIRT_OFFSET + PM4LT_PHYS_ADDR);
+    pml4_virt_addr[256] = (pdpte_phys_page_addr & PT_ADDR_MASK) | PT_PRESENT | PT_WRITEABLE;
+
+    reload_cr3(PM4LT_PHYS_ADDR);
+
+    serial_writestring("Testing linear map:\n");
+    const struct multiboot_tag_mmap *const memory_map_virtual_ptr = (struct multiboot_tag_mmap*) KERNEL_P2V(mmap_phys_addr);
+    for(uint32_t i = 0; i < (memory_map_virtual_ptr->size - sizeof(struct multiboot_tag_mmap))/memory_map_virtual_ptr->entry_size; ++i) {
+        const struct multiboot_mmap_entry current_entry = memory_map_virtual_ptr->entries[i];
+        serial_writestring("mmap_entry : { [");
+        serial_writestring(print_hex(current_entry.addr, str_buf)); // TODO: Print hex
+        serial_writestring("--");
+        serial_writestring(print_hex(current_entry.addr+current_entry.len-1u, str_buf));
+        serial_writestring("], type: ");
+        if(current_entry.type == MULTIBOOT_MEMORY_AVAILABLE) {
+            serial_writestring("AVAILABLE.");
+        }
+        else if(current_entry.type == MULTIBOOT_MEMORY_RESERVED) {
+            serial_writestring("RESERVED.");
+        }
+        else if(current_entry.type == MULTIBOOT_MEMORY_ACPI_RECLAIMABLE) {
+            serial_writestring("ACPI_RECLAIMABLE.");
+        }
+        else if(current_entry.type == MULTIBOOT_MEMORY_NVS) {
+            serial_writestring("NVS.");
+        }
+        else if(current_entry.type == MULTIBOOT_MEMORY_BADRAM) {
+            serial_writestring("BADRAM.");
+        }
+        else {
+            serial_writestring("UNKNOWN RESERVED: ");
+            serial_writestring(print_digits(current_entry.type, str_buf));
+            serial_writestring(".");
+        }
+        serial_writestring("}\n");
     }
 
     halt();

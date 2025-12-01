@@ -1,7 +1,7 @@
 ENTRY(_start)
 
 KERNEL_PHYS_START = 0x00100000; /* skip first 1 MiB */
-KERNEL_VIRT_OFFSET = 0XFFFFFFFF80000000; /* beginning of highest 2GiB */
+KERNEL_VIRT_OFFSET = 0xFFFFFFFF80000000; /* beginning of highest 2GiB */
 
 SECTIONS
 {
@@ -37,8 +37,8 @@ SECTIONS
     . = ALIGN(4K);
     .bss : AT(ADDR(.bss) - KERNEL_VIRT_OFFSET)
     {
-        *(.COMMON)
         *(.bss)
+        *(COMMON)
     }
 
     /* Discard .note.* and .eh_frame* since they may cause issues on some hosts. */
@@ -46,4 +46,6 @@ SECTIONS
         *(.eh_frame*)
         *(.note .note.*)
     }
+
+    kernel_end = .;
 }
