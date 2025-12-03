@@ -9,7 +9,7 @@ LD := $(TOOLCHAIN_PREFIX)ld
 override CFLAGS += \
     -Wall \
     -Wextra \
-    -std=gnu11 \
+    -std=gnu17 \
     -ffreestanding \
     -fno-stack-protector \
     -fno-stack-check \

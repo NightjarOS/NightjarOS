@@ -8,6 +8,7 @@
 #include <kernel/mem/mem_constants.h>
 #include <kernel/mem/map_mem.h>
 #include <kernel/mem/early_boot/early_boot_allocator.h>
+#include <kernel/mem/phys/phys_mem_allocator.h>
 
 #include "multiboot.h"
 
@@ -19,15 +20,10 @@ void kernel_main(const uint64_t mboot_magic, const uint64_t mboot_header_phys_ad
     }
 
     char str_buf[128];
-    if (mboot_magic != MULTIBOOT2_BOOTLOADER_MAGIC) {
-        serial_writestring("Invalid Multiboot Magic!\n");
-        serial_writestring("Expected: ");
-        serial_writestring(print_digits(MULTIBOOT2_BOOTLOADER_MAGIC, str_buf));
-        serial_writestring(", Actual: ");
-        serial_writestring(print_digits(mboot_magic, str_buf));
-        serial_writestring(".\n");
-    } else {
+    if (mboot_magic == MULTIBOOT2_BOOTLOADER_MAGIC) {
         serial_writestring("The multiboot structure was loaded properly.\n");
+    } else {
+        halt_and_die("Bad multiboot magic detected.");
     }
 
     early_single_page_virt_page_init();
@@ -35,10 +31,10 @@ void kernel_main(const uint64_t mboot_magic, const uint64_t mboot_header_phys_ad
     // TODO: This works, but is atrocious to read/look at. We should refactor it immensely.
     const struct multiboot_tag_mmap* mmap = NULL;
     uint64_t mmap_phys_addr = 0u;
-    uint64_t current_phys_ptr = mboot_header_phys_addr+8;
-    const struct multiboot_tag* current_virt_ptr = (struct multiboot_tag*)(early_single_page_virt_page_addr + offset_in_page(current_phys_ptr));
+    uint64_t current_phys_ptr = mboot_header_phys_addr + sizeof(uint64_t);
+    const struct multiboot_tag* current_virt_ptr = (struct multiboot_tag*) (early_single_page_virt_page_addr + offset_in_page(current_phys_ptr));
     unconditional_map_page_in_first_2mib(current_phys_ptr, (uint64_t)current_virt_ptr);
-    for(; current_virt_ptr->type != MULTIBOOT_TAG_TYPE_END; current_phys_ptr = (uint64_t)(current_phys_ptr  + ((current_virt_ptr->size+7) & ~7))) {
+    for(; current_virt_ptr->type != MULTIBOOT_TAG_TYPE_END; current_phys_ptr = (uint64_t)(current_phys_ptr  + round_up(current_virt_ptr->size, sizeof(uint64_t)))) {
         current_virt_ptr = (struct multiboot_tag*)(early_single_page_virt_page_addr + offset_in_page(current_phys_ptr));
         unconditional_map_page_in_first_2mib(current_phys_ptr, (uint64_t)current_virt_ptr);
         if(current_virt_ptr->type == MULTIBOOT_TAG_TYPE_MMAP) {
@@ -46,7 +42,7 @@ void kernel_main(const uint64_t mboot_magic, const uint64_t mboot_header_phys_ad
             mmap = (struct multiboot_tag_mmap*)current_virt_ptr;
             // NOTE: The memory map is not guaranteed to be a single page, so we should replace the below check with the same traversal logic we used above when reading it later
             const uint64_t mmap_base = (uint64_t)mmap;
-            const uint64_t mmap_end = mmap_base + mmap->size - 1;
+            const uint64_t mmap_end = mmap_base + mmap->size - 1u;
             if(round_down_to_page(mmap_base) != round_down_to_page(mmap_end)) {
                 halt_and_die("mmap crosses multiple pages.");
             }
@@ -119,8 +115,20 @@ void kernel_main(const uint64_t mboot_magic, const uint64_t mboot_header_phys_ad
 
     reload_cr3(PM4LT_PHYS_ADDR);
 
+    const uint64_t total_number_of_pages = round_down_to_page(amount_to_map)/NORMAL_PAGE_SIZE;
+    const uint64_t total_number_of_pages_rounded_up = round_up(total_number_of_pages, 64ULL);
+    const uint64_t total_number_of_uint64t_entries = total_number_of_pages_rounded_up/64ULL;
+    const uint64_t total_number_of_excess_pages = total_number_of_pages_rounded_up - total_number_of_pages;
+    const uint64_t phys_mem_physical_memory = early_boot_alloc((struct multiboot_tag_mmap*) GENERAL_MEM_P2V(mmap_phys_addr), total_number_of_uint64t_entries*sizeof(uint64_t));
+
+    phys_mem_alloc_init((uint64_t*)GENERAL_MEM_P2V(phys_mem_physical_memory), total_number_of_uint64t_entries);
+
+    phys_mem_reserve_pages(0x00100000ULL, KERNEL_V2P((uint64_t)&kernel_end) - 0x00100000ULL);
+    phys_mem_reserve_pages(mboot_header_phys_addr, multiboot_total_size);
+    phys_mem_reserve_pages(total_number_of_pages*NORMAL_PAGE_SIZE, total_number_of_excess_pages*NORMAL_PAGE_SIZE);
+
     serial_writestring("Testing linear map:\n");
-    const struct multiboot_tag_mmap *const memory_map_virtual_ptr = (struct multiboot_tag_mmap*) KERNEL_P2V(mmap_phys_addr);
+    const struct multiboot_tag_mmap *const memory_map_virtual_ptr = (struct multiboot_tag_mmap*) GENERAL_MEM_P2V(mmap_phys_addr);
     for(uint32_t i = 0; i < (memory_map_virtual_ptr->size - sizeof(struct multiboot_tag_mmap))/memory_map_virtual_ptr->entry_size; ++i) {
         const struct multiboot_mmap_entry current_entry = memory_map_virtual_ptr->entries[i];
         serial_writestring("mmap_entry : { [");
@@ -133,23 +141,39 @@ void kernel_main(const uint64_t mboot_magic, const uint64_t mboot_header_phys_ad
         }
         else if(current_entry.type == MULTIBOOT_MEMORY_RESERVED) {
             serial_writestring("RESERVED.");
+
+            const uint64_t start = current_entry.addr;
+            uint64_t end   = current_entry.addr + current_entry.len; // exclusive
+            const uint64_t tracked_end = total_number_of_pages * NORMAL_PAGE_SIZE;
+            if (start < tracked_end) {
+                if (end > tracked_end) {
+                    end = tracked_end; // clip to bitmap end
+                }
+                phys_mem_reserve_pages(start, end - start);
+            }
         }
         else if(current_entry.type == MULTIBOOT_MEMORY_ACPI_RECLAIMABLE) {
             serial_writestring("ACPI_RECLAIMABLE.");
+            phys_mem_reserve_pages(current_entry.addr, current_entry.len);
         }
         else if(current_entry.type == MULTIBOOT_MEMORY_NVS) {
             serial_writestring("NVS.");
+            phys_mem_reserve_pages(current_entry.addr, current_entry.len);
         }
         else if(current_entry.type == MULTIBOOT_MEMORY_BADRAM) {
             serial_writestring("BADRAM.");
+            phys_mem_reserve_pages(current_entry.addr, current_entry.len);
         }
         else {
             serial_writestring("UNKNOWN RESERVED: ");
             serial_writestring(print_digits(current_entry.type, str_buf));
             serial_writestring(".");
+            phys_mem_reserve_pages(current_entry.addr, current_entry.len);
         }
         serial_writestring("}\n");
     }
+
+
 
     halt();
 }
