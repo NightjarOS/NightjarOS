@@ -1,7 +1,6 @@
 #include <stdint.h>
 #include <stddef.h>
 
-#include <types.h>
 #include <kernel/drivers/serial/serial.h>
 #include <kernel/error/error.h>
 
@@ -9,6 +8,8 @@
 #include <kernel/mem/map_mem.h>
 #include <kernel/mem/early_boot/early_boot_allocator.h>
 #include <kernel/mem/phys/phys_mem_allocator.h>
+
+#include <kernel/acpi/acpi_tables.h>
 
 #include "multiboot.h"
 
@@ -18,8 +19,8 @@ struct ramdisk_metadata {
 };
 
 // this will also setup the temporary virtual memory mapping for the memory map at `(early_single_page_virt_page_addr + offset_in_page(mmap_physical_addr))`
-uint64_t get_memory_map(const uint64_t mboot_header_phys_addr) {
-    uint64_t current_phys_ptr = mboot_header_phys_addr + 2 * sizeof(multiboot_uint32_t);
+static uint64_t get_memory_map(const uint64_t mboot_header_phys_addr) {
+    uint64_t current_phys_ptr = mboot_header_phys_addr + 2*sizeof(multiboot_uint32_t);
 
     for(;;) {
         const struct multiboot_tag *const current_virt_ptr = (struct multiboot_tag*) (early_single_page_virt_page_addr + offset_in_page(current_phys_ptr));
@@ -43,8 +44,6 @@ uint64_t get_memory_map(const uint64_t mboot_header_phys_addr) {
     }
 
     halt_and_die("Memory map not found.");
-
-    return 0u; // return just to silence gcc warnings
 }
 
 struct memory_size_info {
@@ -52,7 +51,7 @@ struct memory_size_info {
     uint64_t amount_to_map;
 };
 
-struct memory_size_info get_memory_size_info(const struct multiboot_tag_mmap *const memory_map_virtual_ptr) {
+static struct memory_size_info get_memory_size_info(const struct multiboot_tag_mmap *const memory_map_virtual_ptr) {
     uint64_t total_available_memory = 0u;
     uint64_t amount_to_map = 0u;
     for(uint32_t i = 0; i < (memory_map_virtual_ptr->size - sizeof(struct multiboot_tag_mmap))/memory_map_virtual_ptr->entry_size; ++i) {
@@ -71,7 +70,7 @@ struct memory_size_info get_memory_size_info(const struct multiboot_tag_mmap *co
     return (struct memory_size_info) { total_available_memory, amount_to_map };
 }
 
-void print_memory_map(const struct multiboot_tag_mmap *const memory_map_virtual_ptr, const struct memory_size_info mem_size_info) {
+static void print_memory_map(const struct multiboot_tag_mmap *const memory_map_virtual_ptr, const struct memory_size_info mem_size_info) {
     char str_buf[128];
     serial_writestring("Memory map:\n");
     for(uint32_t i = 0; i < (memory_map_virtual_ptr->size - sizeof(struct multiboot_tag_mmap))/memory_map_virtual_ptr->entry_size; ++i) {
@@ -109,7 +108,7 @@ void print_memory_map(const struct multiboot_tag_mmap *const memory_map_virtual_
     serial_writestring(".\n");
 }
 
-uint64_t setup_linear_mapping(const struct multiboot_tag_mmap *const memory_map_virtual_ptr, const struct memory_size_info mem_size_info) {
+static uint64_t setup_linear_mapping(const struct multiboot_tag_mmap *const memory_map_virtual_ptr, const struct memory_size_info mem_size_info) {
     const uint64_t number_of_huge_pages = round_up(mem_size_info.amount_to_map, HUGE_PAGE_1GIB)/HUGE_PAGE_1GIB;
     const uint64_t number_of_pdpte_pages = round_up(number_of_huge_pages, 512)/512ULL;
     if(number_of_pdpte_pages != 1) {
@@ -130,7 +129,7 @@ uint64_t setup_linear_mapping(const struct multiboot_tag_mmap *const memory_map_
     return pdpte_phys_page_addr;
 }
 
-void reserve_unavailable_physical_memory(const uint64_t mboot_header_phys_addr, const uint64_t mmap_physical_addr, const struct memory_size_info mem_size_info, const struct ramdisk_metadata ramdisk_metadata, const uint64_t pdpte_phys_page_addr) {
+static void reserve_unavailable_physical_memory(const uint64_t mboot_header_phys_addr, const uint64_t mmap_physical_addr, const struct memory_size_info mem_size_info, const struct ramdisk_metadata ramdisk_metadata, const uint64_t pdpte_phys_page_addr) {
     const uint64_t total_number_of_pages = round_down_to_page(mem_size_info.amount_to_map)/NORMAL_PAGE_SIZE;
     const uint64_t total_number_of_pages_rounded_up = round_up(total_number_of_pages, 64ULL);
     const uint64_t total_number_of_uint64t_entries = total_number_of_pages_rounded_up/64ULL;
@@ -166,8 +165,8 @@ void reserve_unavailable_physical_memory(const uint64_t mboot_header_phys_addr, 
     }
 }
 
-void dump_multiboot_tags(const uint64_t mboot_header_phys_addr) {
-    uint64_t current_phys_ptr = mboot_header_phys_addr + 2 * sizeof(multiboot_uint32_t);
+static void dump_multiboot_tags(const uint64_t mboot_header_phys_addr) {
+    uint64_t current_phys_ptr = mboot_header_phys_addr + 2*sizeof(multiboot_uint32_t);
 
     char str_buf[128];
 
@@ -252,8 +251,8 @@ void dump_multiboot_tags(const uint64_t mboot_header_phys_addr) {
     serial_writestring("}\n");
 }
 
-struct multiboot_tag_framebuffer* get_framebuffer(const uint64_t mboot_header_phys_addr) {
-    uint64_t current_phys_ptr = mboot_header_phys_addr + 2 * sizeof(multiboot_uint32_t);
+static struct multiboot_tag_framebuffer* get_framebuffer(const uint64_t mboot_header_phys_addr) {
+    uint64_t current_phys_ptr = mboot_header_phys_addr + 2*sizeof(multiboot_uint32_t);
 
     for(;;) {
         const struct multiboot_tag *const current_virt_ptr = (struct multiboot_tag*) GENERAL_MEM_P2V(current_phys_ptr);
@@ -268,12 +267,10 @@ struct multiboot_tag_framebuffer* get_framebuffer(const uint64_t mboot_header_ph
     }
 
     halt_and_die("Framebuffer not found.");
-
-    return NULL; // return just to silence gcc warnings
 }
 
-struct ramdisk_metadata get_ramdisk_metadata(const uint64_t mboot_header_phys_addr) {
-    uint64_t current_phys_ptr = mboot_header_phys_addr + 2 * sizeof(multiboot_uint32_t);
+static struct ramdisk_metadata get_ramdisk_metadata(const uint64_t mboot_header_phys_addr) {
+    uint64_t current_phys_ptr = mboot_header_phys_addr + 2*sizeof(multiboot_uint32_t);
 
     for(;;) {
         const struct multiboot_tag *const current_virt_ptr = (struct multiboot_tag*) (early_single_page_virt_page_addr + offset_in_page(current_phys_ptr));
@@ -290,12 +287,10 @@ struct ramdisk_metadata get_ramdisk_metadata(const uint64_t mboot_header_phys_ad
     }
 
     halt_and_die("Ramdisk not found.");
-
-    return (struct ramdisk_metadata) { 0, 0 }; // return just to silence gcc warnings
 }
 
-struct multiboot_tag_module* get_ramdisk(const uint64_t mboot_header_phys_addr) {
-    uint64_t current_phys_ptr = mboot_header_phys_addr + 2 * sizeof(multiboot_uint32_t);
+static struct multiboot_tag_module* get_ramdisk(const uint64_t mboot_header_phys_addr) {
+    uint64_t current_phys_ptr = mboot_header_phys_addr + 2*sizeof(multiboot_uint32_t);
 
     for(;;) {
         const struct multiboot_tag *const current_virt_ptr = (struct multiboot_tag*) GENERAL_MEM_P2V(current_phys_ptr);
@@ -310,9 +305,8 @@ struct multiboot_tag_module* get_ramdisk(const uint64_t mboot_header_phys_addr) 
     }
 
     halt_and_die("Ramdisk not found.");
-
-    return NULL; // return just to silence gcc warnings
 }
+
 
 void kernel_main(const uint64_t mboot_magic, const uint64_t mboot_header_phys_addr) {
     if(serial_init()) {
@@ -350,7 +344,6 @@ void kernel_main(const uint64_t mboot_magic, const uint64_t mboot_header_phys_ad
 
 
 
-
     dump_multiboot_tags(mboot_header_phys_addr);
 
     print_memory_map(mmap_virtual_ptr, mem_size_info);
@@ -369,7 +362,21 @@ void kernel_main(const uint64_t mboot_magic, const uint64_t mboot_header_phys_ad
 
     const struct multiboot_tag_module *const initrd = get_ramdisk(mboot_header_phys_addr);
     const char *const start_of_data = (const char*) GENERAL_MEM_P2V(initrd->mod_start);
+    serial_writestring("Contents of ramdisk:\n");
     serial_write(start_of_data, initrd->mod_end - initrd->mod_start);
+    serial_writestring("\n");
+
+
+
+
+    const struct RSDP *const RSDP_virt_addr = get_rsdp(mboot_header_phys_addr);
+    const struct XSDT *const XSDT_virt_addr = get_XSDT(RSDP_virt_addr);
+    enumerate_sdt_entries(XSDT_virt_addr);
+    const struct FADT *const FADT_virt_addr = get_FADT(XSDT_virt_addr);
+    const struct MADT *const MADT_virt_addr = get_MADT(XSDT_virt_addr);
+    enumerate_madt_interrupt_entries(MADT_virt_addr);
+
+
 
     halt();
 }

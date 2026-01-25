@@ -34,5 +34,4 @@ uint64_t early_boot_alloc(const struct multiboot_tag_mmap *const mmap, const uin
     }
 
     halt_and_die("There is not enough memory for early processes!");
-    return 0u; // return just to silence gcc warnings
 }

@@ -58,3 +58,15 @@ size_t strlen(const char *const str) {
     for(; str[len] != '\0'; ++len);
     return len;
 }
+
+int strncmp(const char* lhs, const char* rhs, size_t count) {
+    while(count-- != 0) {
+        unsigned char lhs_char = (unsigned char) *lhs++;
+        unsigned char rhs_char = (unsigned char) *rhs++;
+        if(lhs_char != rhs_char) {
+            return lhs_char - rhs_char; // even though `lhs_char` and `rhs_char` are unsigned, this can be negative because of integer promotion.
+        }
+        if(lhs_char == '\0') return 0; // both strings have ended before `count`
+    }
+    return 0;
+}

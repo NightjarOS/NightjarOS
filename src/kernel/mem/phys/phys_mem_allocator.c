@@ -76,7 +76,6 @@ uint64_t phys_mem_allocate_page(void) {
         }
     }
     halt_and_die("Out of physical memory.");
-    return 0u; // return just to silence gcc warnings
 }
 
 void phys_mem_free_page(const uint64_t page_addr) {

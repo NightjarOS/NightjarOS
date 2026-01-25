@@ -123,6 +123,7 @@ CPUID_EXTENSIONS_FEATURES equ 0x80000001
 CPUID_EDX_EXTENSION_FEATURE_LONG_MODE equ 1 << 29
 
 PAE_ENABLE_BIT equ 1 << 5
+MACHINE_CHECK_ENABLE_BIT equ 1 << 6
 GLOBAL_PAGE_ENABLE_BIT equ 1 << 7
 
 IA32_EFER equ 0xC0000080
@@ -228,12 +229,15 @@ check_cpuid:
 
 BITS 32
 check_support_for_long_mode:
+    xor ecx, ecx
     mov eax, CPUID_EXTENSIONS
     cpuid
 
+    xor ecx, ecx
     cmp eax, CPUID_EXTENSIONS_FEATURES
     jb .no_long_mode ; Intel manual says that eax >= CPUID_EXTENSIONS_FEATURES if any of the CPUID extensions are supported
 
+    xor ecx, ecx
     mov eax, CPUID_EXTENSIONS_FEATURES
     cpuid
 
@@ -288,8 +292,7 @@ _start:
 	wrmsr
 
     mov eax, cr4
-    or eax, PAE_ENABLE_BIT
-    or eax, GLOBAL_PAGE_ENABLE_BIT
+    or eax, PAE_ENABLE_BIT | MACHINE_CHECK_ENABLE_BIT | GLOBAL_PAGE_ENABLE_BIT
     mov cr4, eax
 
     mov ecx, IA32_EFER
@@ -381,7 +384,7 @@ long_mode_entry:
     mov ss, ax
 
     mov rsp, boot_stack
-    
+
     ; We have to indirect jump here so that it will actually load the higher half absolute address.
     ;  If we direct jump, because both `long_mode_entry` and `higher_half_long_mode` are in the `.text` section,
     ;   it'll just do a relative jump and not actually load us into the higher half address space.
